@@ -1,0 +1,14 @@
+{
+  "name": "zot bridge",
+  "id": "zot-figma-local-bridge",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma", "figjam"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:38451"],
+    "reasoning": "Connects to the local zot extension only during development."
+  }
+}

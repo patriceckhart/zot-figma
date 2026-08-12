@@ -1,0 +1,9 @@
+{
+  "name": "figma",
+  "version": "0.1.0",
+  "exec": "go",
+  "args": ["run", "."],
+  "language": "go",
+  "description": "Read and edit open Figma Design and FigJam files through a local plugin bridge",
+  "enabled": true
+}

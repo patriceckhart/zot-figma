@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; padding: 12px; font: 12px Inter, sans-serif; color: #222; }
+    #status { font-weight: 600; margin-bottom: 6px; }
+    #detail { color: #666; line-height: 1.4; }
+  </style>
+</head>
+<body>
+  <div id="status">Connecting to zot...</div>
+  <div id="detail">Keep this plugin open while zot works with this file.</div>
+  <script>
+    const base = "http://localhost:38451";
+    let stopped = false;
+    const status = document.getElementById("status");
+    const detail = document.getElementById("detail");
+
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    async function sendResult(message) {
+      await fetch(base + "/result", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(message)
+      });
+    }
+
+    async function poll() {
+      while (!stopped) {
+        try {
+          const response = await fetch(base + "/poll", { cache: "no-store" });
+          if (!response.ok) throw new Error("HTTP " + response.status);
+          status.textContent = "Connected to zot";
+          detail.textContent = "Waiting for canvas operations...";
+          const command = await response.json();
+          if (command && command.id) {
+            detail.textContent = "Running " + command.operation + "...";
+            parent.postMessage({ pluginMessage: { type: "command", command } }, "*");
+          }
+        } catch (error) {
+          status.textContent = "Waiting for zot";
+          detail.textContent = "Start zot with: zot --ext ~/Developer/zot-figma";
+          await sleep(1000);
+        }
+      }
+    }
+
+    onmessage = async event => {
+      const message = event.data.pluginMessage;
+      if (!message || message.type !== "result") return;
+      try {
+        await sendResult(message.result);
+        detail.textContent = "Operation complete.";
+      } catch (error) {
+        detail.textContent = "Could not return result to zot: " + error.message;
+      }
+    };
+
+    poll();
+  </script>
+</body>
+</html>
