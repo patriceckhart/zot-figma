@@ -25,6 +25,27 @@ const loadFont = async node => {
   }
 };
 
+const weightStyles = {
+  100: "Thin", 200: "Extra Light", 300: "Light", 400: "Regular", 500: "Medium",
+  600: "Semi Bold", 700: "Bold", 800: "Extra Bold", 900: "Black"
+};
+
+const effects = values => values && values.map(value => {
+  const effect = { visible: true, ...value };
+  if (effect.type === "DROP_SHADOW" || effect.type === "INNER_SHADOW") {
+    const color = typeof effect.color === "string" ? rgba(effect.color) : (effect.color || { r: 0, g: 0, b: 0 });
+    effect.color = { r: color.r, g: color.g, b: color.b, a: effect.opacity ?? color.a ?? 0.25 };
+    delete effect.opacity;
+    effect.offset = effect.offset || { x: 0, y: 4 };
+    effect.radius = effect.radius ?? 12;
+    effect.spread = effect.spread ?? 0;
+    effect.blendMode = effect.blendMode || "NORMAL";
+  } else {
+    effect.radius = effect.radius ?? 8;
+  }
+  return effect;
+});
+
 function summary(node, depth = 1) {
   const out = {
     id: node.id,
@@ -36,7 +57,11 @@ function summary(node, depth = 1) {
     width: node.width,
     height: node.height
   };
-  if ("characters" in node) out.text = node.characters;
+  if ("characters" in node) {
+    out.text = node.characters;
+    if (node.fontName !== figma.mixed) out.fontName = node.fontName;
+    if (node.fontSize !== figma.mixed) out.fontSize = node.fontSize;
+  }
   if ("layoutMode" in node) {
     out.layoutMode = node.layoutMode;
     out.itemSpacing = node.itemSpacing;
@@ -53,7 +78,25 @@ async function find(id) {
   return node;
 }
 
+// Make a child actually fill its parent's axis: auto-layout children only
+// stretch when the matching sizing mode is FIXED, and text needs a fixed width.
+function fillAxis(node, parentAxis) {
+  const parent = node.parent;
+  if (!parent || !("layoutMode" in parent) || parent.layoutMode === "NONE") return;
+  const parentHorizontal = parent.layoutMode === "HORIZONTAL";
+  const fillHorizontal = parentAxis === "primary" ? parentHorizontal : !parentHorizontal;
+  // Reset text to its natural size first, otherwise a zero width gets frozen.
+  if (node.type === "TEXT") node.textAutoResize = "WIDTH_AND_HEIGHT";
+  if (fillHorizontal) {
+    node.layoutSizingHorizontal = "FILL";
+    if (node.type === "TEXT") node.textAutoResize = "HEIGHT";
+  } else {
+    node.layoutSizingVertical = "FILL";
+  }
+}
+
 async function setProps(node, spec) {
+  if (node.type === "TEXT") await loadFont(node);
   if (spec.name !== undefined) node.name = spec.name;
   if (spec.x !== undefined) node.x = spec.x;
   if (spec.y !== undefined) node.y = spec.y;
@@ -66,7 +109,15 @@ async function setProps(node, spec) {
   if (spec.strokes !== undefined && "strokes" in node) node.strokes = paints(spec.strokes);
   if (spec.strokeWeight !== undefined && "strokeWeight" in node) node.strokeWeight = spec.strokeWeight;
   if (spec.cornerRadius !== undefined && "cornerRadius" in node) node.cornerRadius = spec.cornerRadius;
-  if (spec.layoutMode !== undefined && "layoutMode" in node) node.layoutMode = spec.layoutMode;
+  if (spec.layoutMode !== undefined && "layoutMode" in node) {
+    node.layoutMode = spec.layoutMode;
+    if (spec.layoutMode !== "NONE") {
+      const horizontal = spec.layoutMode === "HORIZONTAL";
+      node[horizontal ? "primaryAxisSizingMode" : "counterAxisSizingMode"] = spec.width !== undefined ? "FIXED" : "AUTO";
+      node[horizontal ? "counterAxisSizingMode" : "primaryAxisSizingMode"] = spec.height !== undefined ? "FIXED" : "AUTO";
+      if (spec.width !== undefined || spec.height !== undefined) node.resize(spec.width ?? node.width, spec.height ?? node.height);
+    }
+  }
   if (spec.primaryAxisSizingMode !== undefined && "primaryAxisSizingMode" in node) node.primaryAxisSizingMode = spec.primaryAxisSizingMode;
   if (spec.counterAxisSizingMode !== undefined && "counterAxisSizingMode" in node) node.counterAxisSizingMode = spec.counterAxisSizingMode;
   if (spec.primaryAxisAlignItems !== undefined && "primaryAxisAlignItems" in node) node.primaryAxisAlignItems = spec.primaryAxisAlignItems;
@@ -80,13 +131,57 @@ async function setProps(node, spec) {
     node.paddingLeft = p.left ?? node.paddingLeft;
   }
   if (spec.constraints !== undefined && "constraints" in node) node.constraints = spec.constraints;
-  if (spec.text !== undefined && "characters" in node) {
-    await loadFont(node);
-    node.characters = spec.text;
+  if (spec.effects !== undefined && "effects" in node) node.effects = effects(spec.effects);
+  if (spec.strokeAlign !== undefined && "strokeAlign" in node) node.strokeAlign = spec.strokeAlign;
+  if (spec.clipsContent !== undefined && "clipsContent" in node) node.clipsContent = spec.clipsContent;
+  if (spec.layoutWrap !== undefined && "layoutWrap" in node) node.layoutWrap = spec.layoutWrap;
+  if (spec.counterAxisSpacing !== undefined && "counterAxisSpacing" in node) node.counterAxisSpacing = spec.counterAxisSpacing;
+  if (spec.layoutAlign !== undefined && "layoutAlign" in node) {
+    node.layoutAlign = spec.layoutAlign;
+    if (spec.layoutAlign === "STRETCH") fillAxis(node, "counter");
   }
-  if (spec.fontSize !== undefined && "fontSize" in node) {
-    await loadFont(node);
-    node.fontSize = spec.fontSize;
+  if (spec.layoutGrow !== undefined && "layoutGrow" in node) {
+    node.layoutGrow = spec.layoutGrow;
+    if (spec.layoutGrow > 0) fillAxis(node, "primary");
+  }
+  if (spec.layoutPositioning !== undefined && "layoutPositioning" in node) node.layoutPositioning = spec.layoutPositioning;
+  if (spec.minWidth !== undefined && "minWidth" in node) node.minWidth = spec.minWidth;
+  if (spec.maxWidth !== undefined && "maxWidth" in node) node.maxWidth = spec.maxWidth;
+  if (spec.minHeight !== undefined && "minHeight" in node) node.minHeight = spec.minHeight;
+  if (spec.maxHeight !== undefined && "maxHeight" in node) node.maxHeight = spec.maxHeight;
+  if ("characters" in node) {
+    if (spec.fontFamily !== undefined || spec.fontWeight !== undefined || spec.fontStyle !== undefined) {
+      const current = node.fontName === figma.mixed ? { family: "Inter", style: "Regular" } : node.fontName;
+      const family = spec.fontFamily || current.family;
+      let style = spec.fontStyle || (spec.fontWeight !== undefined ? (weightStyles[spec.fontWeight] || String(spec.fontWeight)) : current.style);
+      try {
+        await figma.loadFontAsync({ family, style });
+      } catch (error) {
+        const fallback = style.replace(" ", "");
+        await figma.loadFontAsync({ family, style: fallback });
+        style = fallback;
+      }
+      node.fontName = { family, style };
+    } else if (spec.text !== undefined || spec.fontSize !== undefined || spec.textAlignHorizontal !== undefined || spec.lineHeight !== undefined || spec.letterSpacing !== undefined) {
+      await loadFont(node);
+    }
+    if (spec.text !== undefined) node.characters = spec.text;
+    if (spec.fontSize !== undefined) node.fontSize = spec.fontSize;
+    if (spec.textAlignHorizontal !== undefined) node.textAlignHorizontal = spec.textAlignHorizontal;
+    if (spec.textAlignVertical !== undefined) node.textAlignVertical = spec.textAlignVertical;
+    if (spec.textAutoResize !== undefined) node.textAutoResize = spec.textAutoResize;
+    if (spec.lineHeight !== undefined) node.lineHeight = typeof spec.lineHeight === "number" ? { value: spec.lineHeight, unit: "PIXELS" } : spec.lineHeight;
+    if (spec.letterSpacing !== undefined) node.letterSpacing = typeof spec.letterSpacing === "number" ? { value: spec.letterSpacing, unit: "PERCENT" } : spec.letterSpacing;
+    if (spec.textCase !== undefined) node.textCase = spec.textCase;
+    if (spec.textTruncation !== undefined) node.textTruncation = spec.textTruncation;
+    if (spec.maxLines !== undefined) node.maxLines = spec.maxLines;
+    if (spec.textDecoration !== undefined) node.textDecoration = spec.textDecoration;
+    if (spec.textWidth !== undefined) {
+      node.textAutoResize = "HEIGHT";
+      node.resize(spec.textWidth, node.height);
+    }
+    if (spec.layoutAlign === "STRETCH") fillAxis(node, "counter");
+    if (spec.layoutGrow > 0) fillAxis(node, "primary");
   }
   if (spec.componentProperties !== undefined && node.type === "INSTANCE") node.setProperties(spec.componentProperties);
   if (spec.connectorStart !== undefined && node.type === "CONNECTOR") node.connectorStart = spec.connectorStart;
