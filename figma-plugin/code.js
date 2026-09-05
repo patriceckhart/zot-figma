@@ -173,8 +173,6 @@ async function setProps(node, spec) {
     if (spec.lineHeight !== undefined) node.lineHeight = typeof spec.lineHeight === "number" ? { value: spec.lineHeight, unit: "PIXELS" } : spec.lineHeight;
     if (spec.letterSpacing !== undefined) node.letterSpacing = typeof spec.letterSpacing === "number" ? { value: spec.letterSpacing, unit: "PERCENT" } : spec.letterSpacing;
     if (spec.textCase !== undefined) node.textCase = spec.textCase;
-    if (spec.textTruncation !== undefined) node.textTruncation = spec.textTruncation;
-    if (spec.maxLines !== undefined) node.maxLines = spec.maxLines;
     if (spec.textDecoration !== undefined) node.textDecoration = spec.textDecoration;
     if (spec.textWidth !== undefined) {
       node.textAutoResize = "HEIGHT";
@@ -182,6 +180,15 @@ async function setProps(node, spec) {
     }
     if (spec.layoutAlign === "STRETCH") fillAxis(node, "counter");
     if (spec.layoutGrow > 0) fillAxis(node, "primary");
+    if (spec.textTruncation !== undefined) node.textTruncation = spec.textTruncation;
+    if (spec.maxLines !== undefined) node.maxLines = spec.maxLines;
+  }
+  if (spec.parentId !== undefined || spec.index !== undefined) {
+    const parent = spec.parentId !== undefined ? await find(spec.parentId) : node.parent;
+    if (parent && "insertChild" in parent) {
+      const index = spec.index !== undefined ? spec.index : parent.children.length;
+      parent.insertChild(Math.min(index, parent.children.length), node);
+    }
   }
   if (spec.componentProperties !== undefined && node.type === "INSTANCE") node.setProperties(spec.componentProperties);
   if (spec.connectorStart !== undefined && node.type === "CONNECTOR") node.connectorStart = spec.connectorStart;
@@ -221,6 +228,65 @@ async function createNode(spec, parent) {
   return node;
 }
 
+// Bulk text replacement: update.replaceText = [{ from, to }, ...]
+async function replaceText(root, pairs) {
+  const changed = [];
+  const texts = root.type === "TEXT" ? [root] : root.findAllWithCriteria({ types: ["TEXT"] });
+  for (const text of texts) {
+    let value = text.characters;
+    for (const pair of pairs) value = value.split(pair.from).join(pair.to);
+    if (value === text.characters) continue;
+    await loadFont(text);
+    text.characters = value;
+    if (text.name === text.characters) text.name = value;
+    changed.push(text);
+  }
+  return changed;
+}
+
+const toHex = color => "#" + [color.r, color.g, color.b].map(c => Math.round(c * 255).toString(16).padStart(2, "0")).join("").toUpperCase();
+
+async function getOrCreateVariable(collectionName, variableName, hex) {
+  const collections = await figma.variables.getLocalVariableCollectionsAsync();
+  let collection = collections.find(c => c.name === collectionName);
+  if (!collection) collection = figma.variables.createVariableCollection(collectionName);
+  const modeId = collection.modes[0].modeId;
+  const variables = await figma.variables.getLocalVariablesAsync("COLOR");
+  let variable = variables.find(v => v.name === variableName && v.variableCollectionId === collection.id);
+  if (!variable) variable = figma.variables.createVariable(variableName, collection, "COLOR");
+  const color = rgba(hex);
+  variable.setValueForMode(modeId, { r: color.r, g: color.g, b: color.b, a: 1 });
+  return variable;
+}
+
+// Bind every solid fill/stroke matching a hex to a colour variable.
+// update.replaceColors = { collection, map: [{ hex, variable }] }
+async function replaceColors(root, spec) {
+  const collectionName = spec.collection || "Brand";
+  const byHex = {};
+  for (const entry of spec.map) byHex[entry.hex.toUpperCase()] = await getOrCreateVariable(collectionName, entry.variable, entry.hex);
+  const nodes = "findAll" in root ? [root, ...root.findAll(() => true)] : [root];
+  const changed = [];
+  let bound = 0;
+  for (const node of nodes) {
+    let touched = false;
+    for (const prop of ["fills", "strokes"]) {
+      if (!(prop in node) || node[prop] === figma.mixed) continue;
+      const paintList = node[prop].map(paint => {
+        if (paint.type !== "SOLID") return paint;
+        const variable = byHex[toHex(paint.color)];
+        if (!variable) return paint;
+        bound++;
+        touched = true;
+        return figma.variables.setBoundVariableForPaint(paint, "color", variable);
+      });
+      if (touched) node[prop] = paintList;
+    }
+    if (touched) changed.push(node);
+  }
+  return { nodes: changed, bound };
+}
+
 async function execute(operation, args) {
   if (operation === "figma_read") {
     const depth = args.depth ?? 2;
@@ -244,10 +310,22 @@ async function execute(operation, args) {
     const changed = [];
     for (const update of args.updates) {
       const node = await find(update.id);
+      if (update.setVariables) {
+        for (const entry of update.setVariables) await getOrCreateVariable(entry.collection || "inoovum Brand", entry.variable, entry.hex);
+        return { variables: update.setVariables.map(v => v.variable) };
+      }
+      if (update.replaceText) {
+        changed.push(...await replaceText(node, update.replaceText));
+        continue;
+      }
+      if (update.replaceColors) {
+        const result = await replaceColors(node, update.replaceColors);
+        return { bound: result.bound, nodes: result.nodes.length, variables: update.replaceColors.map.map(m => m.variable) };
+      }
       await setProps(node, update);
       changed.push(node);
     }
-    return { updated: changed.map(node => summary(node, 2)) };
+    return { updated: changed.map(node => summary(node, 1)) };
   }
   if (operation === "figma_delete") {
     for (const id of args.nodeIds) (await find(id)).remove();
